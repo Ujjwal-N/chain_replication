@@ -81,10 +81,10 @@ public class Main {
             try {
                 zk.create(execObj.controlPath + "/replica-", (grpcHostPort + "\nujjwal").getBytes(),
                         ZooDefs.Ids.OPEN_ACL_UNSAFE,
-                        CreateMode.EPHEMERAL);
+                        CreateMode.EPHEMERAL_SEQUENTIAL);
                 zk.create(execObj.controlPath + "/replica-", (grpcHostPort + "\nujjwal").getBytes(),
                         ZooDefs.Ids.OPEN_ACL_UNSAFE,
-                        CreateMode.EPHEMERAL);
+                        CreateMode.EPHEMERAL_SEQUENTIAL);
                 currentChildren = zk.getChildren(execObj.controlPath, new MembershipWatcher());
                 System.out.println(currentChildren);
 
