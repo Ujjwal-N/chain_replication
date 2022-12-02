@@ -12,34 +12,30 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Semaphore;
 
 import org.apache.zookeeper.ZooKeeper;
-import org.apache.zookeeper.data.Stat;
 
 import edu.sjsu.cs249.chain.ReplicaGrpc;
 import edu.sjsu.cs249.chain.ReplicaGrpc.ReplicaBlockingStub;
 
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
-import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
 
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.ServerBuilder;
 
 public class Main {
 
     static final boolean debug = true;
-    static HashMap<String, ReplicaBlockingStub> portToStub = new HashMap<>();
 
     // One time usage static references
     static Cli execObj;
     static ZooKeeper zk;
     static Semaphore mainThreadSem;
-    static String myNodeName;
 
-    //Static references that could change
-    static String myPredecessor;
-    static String mySuccessor;
+    // Static references that could change
+    static Semaphore idlingSem;
 
     @Command(name = "zoolunchleader", mixinStandardHelpOptions = true, description = "register attendance for class.")
     static class Cli implements Callable<Integer> {
@@ -54,90 +50,141 @@ public class Main {
 
         @Override
         public Integer call() throws Exception {
+
+            // Initial threadsafe setup
             mainThreadSem = new Semaphore(1);
+            idlingSem = new Semaphore(1);
+
             mainThreadSem.acquire();
+            idlingSem.acquire();
 
             startZookeeper();
             mainThreadSem.acquire(); // main thread spinning
+
             return 0;
         }
+    }
+
+    public static void exit() {
+        idlingSem.release();
+        mainThreadSem.release();
+        System.exit(0);
     }
 
     public static void startZookeeper() { // starting point of program
 
         try {
             zk = new ZooKeeper(execObj.serverList, 10000, (e) -> {
-                if (e.getState() == Watcher.Event.KeeperState.Expired){
-                    System.exit(0);
+                if (e.getState() == Watcher.Event.KeeperState.Expired) {
+                    exit();
                 }
+
             });
 
-            
-            try {
-                zk.create(execObj.controlPath + "/replica-", (execObj.hostPort + "\nujjwal").getBytes(), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);                
-                MembershipWatcher memWatch = new MembershipWatcher();
-                memWatch.process(null);
-
-            } catch (KeeperException | InterruptedException e1) {
-                // TODO Auto-generated catch block
-                e1.printStackTrace();
+            // Creating my node
+            String actualPath = null;
+            while (actualPath == null) {
+                try {
+                    actualPath = zk.create(execObj.controlPath + "/replica-",
+                            (execObj.hostPort + "\nujjwal").getBytes(),
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
+                } catch (KeeperException | InterruptedException e) {
+                    System.out.println("\nCannot create my own node :(");
+                    e.printStackTrace();
+                }
             }
 
+            String[] splittedPath = actualPath.split("\\/");
+
+            String myNodeName = splittedPath[splittedPath.length - 1];
+            System.out.println("My name is " + myNodeName);
+            calculateNeighborsAndUpdateStubs(myNodeName);
+
         } catch (IOException e) {
-            System.out.println("Zookeeper Not Found");
+            System.out.println("\nZookeeper Not Found :(");
             e.getStackTrace();
         }
 
     }
 
+    static HashMap<String, ReplicaBlockingStub> nameToStub = new HashMap<>();
+    static ReplicaBlockingStub myPredecessorStub = null;
+    static ReplicaBlockingStub mySuccessorStub = null;
 
-    static class MembershipWatcher implements Watcher {
-        @Override
-        public void process(WatchedEvent event) {
-            System.out.println("==========");
+    public static void calculateNeighborsAndUpdateStubs(String myNodeName) {
+
+        System.out.println("==========Fetching children==========");
+        System.out.println("I am " + myNodeName);
+
+        List<String> currentChildren = null;
+        while (currentChildren == null) {
             try {
-                List<String> currentChildren = zk.getChildren(execObj.controlPath, new MembershipWatcher());
-
-                for (String child : currentChildren) {
-                    Stat current = null;
-                    byte[] dataBytes = zk.getData(execObj.controlPath + "/" + child, null, current);
-                    if(dataBytes == null){ 
-                        System.out.println("skipping " + child);
-                        continue;
-                    }
-                    String data = new String(dataBytes);
-                    String[] splitted = data.split("\n");
-                    if (!portToStub.containsKey(splitted[0])) {
-                        System.out.println("Found " + splitted[1] + "@" + splitted[0]);
-
-                        if (!splitted[0].equals(execObj.hostPort)) {
-                            ManagedChannel newChannel = ManagedChannelBuilder.forTarget(splitted[0])
-                                    .usePlaintext()
-                                    .build();
-                            ReplicaBlockingStub newStub = ReplicaGrpc.newBlockingStub(newChannel);
-                            portToStub.put(splitted[0], newStub);
-                        } else {
-                            System.out.println(child + " is me");
-                            myNodeName = child;
-                        }
-                    }
-                }
-
-                Collections.sort(currentChildren);
-                
-                int myIndex = currentChildren.indexOf(myNodeName);
-                myPredecessor = (myIndex == 0) ? "null" : currentChildren.get(myIndex - 1);
-                mySuccessor = (myIndex == (currentChildren.size() - 1)) ? "null" : currentChildren.get(myIndex + 1);
-
-                System.out.println(myPredecessor + " is my predecessor");
-                System.out.println(mySuccessor + " is my successor");
-
+                currentChildren = zk.getChildren(execObj.controlPath, (e) -> {
+                    calculateNeighborsAndUpdateStubs(myNodeName);
+                });
             } catch (KeeperException | InterruptedException e) {
+                System.out.println("\nCannot fetch children :(");
                 e.printStackTrace();
             }
-            System.out.println("==========");
         }
-        
+
+        System.out.println(currentChildren);
+        Collections.sort(currentChildren);
+
+        int myIndex = currentChildren.indexOf(myNodeName);
+        String myPredecessorName = (myIndex == 0) ? null : currentChildren.get(myIndex - 1);
+        String mySuccessorName = (myIndex == (currentChildren.size() - 1)) ? null : currentChildren.get(myIndex + 1);
+
+        try {
+            idlingSem.acquire();
+
+            if ((myPredecessorName != null) && (!nameToStub.containsKey(myPredecessorName))) {
+                nameToStub.put(myPredecessorName, createStub(myPredecessorName));
+            }
+
+            if ((mySuccessorName != null) && (!nameToStub.containsKey(mySuccessorName))) {
+                nameToStub.put(mySuccessorName, createStub(mySuccessorName));
+            }
+
+            if (myPredecessorName == null) {
+                System.out.println("I am the head now!");
+                myPredecessorStub = null;
+            } else {
+                System.out.println(myPredecessorName + " is my predecessor!");
+                myPredecessorStub = nameToStub.get(myPredecessorName);
+            }
+
+            if (mySuccessorName == null) {
+                System.out.println("I am the tail now!");
+                mySuccessorStub = null;
+            } else {
+                System.out.println(mySuccessorName + " is my successor!");
+                mySuccessorStub = nameToStub.get(mySuccessorName);
+            }
+
+        } catch (KeeperException | InterruptedException | NullPointerException e) {
+            System.out.println("\nError while changing successor and/or predecessor stubs :(");
+            e.printStackTrace();
+        } finally {
+            idlingSem.release();
+            System.out.println("=====================================");
+        }
+
+    }
+
+    public static ReplicaBlockingStub createStub(String nodeName)
+            throws KeeperException, InterruptedException, NullPointerException {
+
+        byte[] dataBytes = zk.getData(execObj.controlPath + "/" + nodeName, null, null);
+        String data = new String(dataBytes);
+        String[] splitted = data.split("\n");
+        System.out.println(nodeName + " is actually " + splitted[1] + "@" + splitted[0]);
+
+        ManagedChannel newChannel = ManagedChannelBuilder.forTarget(splitted[0])
+                .usePlaintext()
+                .build();
+        return ReplicaGrpc.newBlockingStub(newChannel);
+
     }
 
     public static void main(String[] args) {
