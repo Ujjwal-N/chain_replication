@@ -148,19 +148,13 @@ public class Main {
 
         try {
             idlingSem.acquire();
-
-            if ((myPredecessorName != null) && (!nameToStub.containsKey(myPredecessorName))) {
-                nameToStub.put(myPredecessorName, createStub(myPredecessorName));
-            }
-
-            if ((mySuccessorName != null) && (!nameToStub.containsKey(mySuccessorName))) {
-                nameToStub.put(mySuccessorName, createStub(mySuccessorName));
-            }
-
             if (myPredecessorName == null) {
                 System.out.println("I am the head now!");
                 myPredecessorStub = null;
             } else {
+                if (!nameToStub.containsKey(myPredecessorName)) {
+                    nameToStub.put(myPredecessorName, createStub(myPredecessorName));
+                }
                 System.out.println(myPredecessorName + " is my predecessor!");
                 myPredecessorStub = nameToStub.get(myPredecessorName);
             }
@@ -169,6 +163,9 @@ public class Main {
                 System.out.println("I am the tail now!");
                 mySuccessorStub = null;
             } else {
+                if (!nameToStub.containsKey(mySuccessorName)) {
+                    nameToStub.put(mySuccessorName, createStub(mySuccessorName));
+                }
                 System.out.println(mySuccessorName + " is my successor!");
                 mySuccessorStub = nameToStub.get(mySuccessorName);
             }
