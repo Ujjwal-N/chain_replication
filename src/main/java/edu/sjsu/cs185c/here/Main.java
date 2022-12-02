@@ -13,8 +13,15 @@ import java.util.concurrent.Semaphore;
 
 import org.apache.zookeeper.ZooKeeper;
 
+import edu.sjsu.cs249.chain.GetRequest;
+import edu.sjsu.cs249.chain.GetResponse;
+import edu.sjsu.cs249.chain.HeadResponse;
+import edu.sjsu.cs249.chain.IncRequest;
 import edu.sjsu.cs249.chain.ReplicaGrpc;
+import edu.sjsu.cs249.chain.UpdateRequest;
+import edu.sjsu.cs249.chain.HeadChainReplicaGrpc.HeadChainReplicaImplBase;
 import edu.sjsu.cs249.chain.ReplicaGrpc.ReplicaBlockingStub;
+import edu.sjsu.cs249.chain.TailChainReplicaGrpc.TailChainReplicaImplBase;
 
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
@@ -23,7 +30,7 @@ import org.apache.zookeeper.ZooDefs;
 
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
-import io.grpc.ServerBuilder;
+import io.grpc.stub.StreamObserver;
 
 public class Main {
 
@@ -36,6 +43,10 @@ public class Main {
 
     // Static references that could change
     static Semaphore idlingSem;
+    static HashMap<String, Integer> KVStore = new HashMap<>();
+
+    static int globalTxIDPending = 0;
+    static int globalTxIDAcked = 0;
 
     @Command(name = "zoolunchleader", mixinStandardHelpOptions = true, description = "register attendance for class.")
     static class Cli implements Callable<Integer> {
@@ -185,6 +196,68 @@ public class Main {
                 .build();
         return ReplicaGrpc.newBlockingStub(newChannel);
 
+    }
+
+    private class Head extends HeadChainReplicaImplBase {
+        @Override
+        public void increment(IncRequest request, StreamObserver<HeadResponse> responseObserver) {
+            try {
+                idlingSem.acquire();
+
+                if (myPredecessorStub != null) {
+                    HeadResponse notHead = HeadResponse.newBuilder().setRc(1).build();
+                    responseObserver.onNext(notHead);
+                    responseObserver.onCompleted();
+                } else {
+                    HeadResponse actuallyHead = HeadResponse.newBuilder().setRc(0).build();
+
+                    if (!KVStore.containsKey(request.getKey())) {
+                        KVStore.put(request.getKey(), 0);
+                    }
+                    int newValue = KVStore.get(request.getKey()) + 1;
+                    KVStore.put(request.getKey(), newValue);
+                    globalTxIDPending++;
+
+                    if (mySuccessorStub != null) {
+                        UpdateRequest req = UpdateRequest.newBuilder().setKey(request.getKey()).setNewValue(newValue)
+                                .setXid(globalTxIDPending).build();
+                        mySuccessorStub.update(req);
+                    }
+                    responseObserver.onNext(actuallyHead);
+                    responseObserver.onCompleted();
+                }
+            } catch (InterruptedException e) {
+                System.out.println("\n Error while processing an increment request");
+                e.printStackTrace();
+            } finally {
+                idlingSem.release();
+            }
+
+        }
+    }
+
+    private class Tail extends TailChainReplicaImplBase {
+        @Override
+        public void get(GetRequest request, StreamObserver<GetResponse> responseObserver) {
+            try {
+                idlingSem.acquire();
+                if (mySuccessorStub != null) {
+                    GetResponse notTail = GetResponse.newBuilder().setRc(1).build();
+                    responseObserver.onNext(notTail);
+                    responseObserver.onCompleted();
+                } else {
+                    int val = KVStore.containsKey(request.getKey()) ? KVStore.get(request.getKey()) : 0;
+                    GetResponse actuallyTail = GetResponse.newBuilder().setRc(0).setValue(val).build();
+                    responseObserver.onNext(actuallyTail);
+                    responseObserver.onCompleted();
+                }
+            } catch (InterruptedException e) {
+                System.out.println("\n Error while processing a get request");
+                e.printStackTrace();
+            } finally {
+                idlingSem.release();
+            }
+        }
     }
 
     public static void main(String[] args) {
