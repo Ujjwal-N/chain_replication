@@ -43,6 +43,8 @@ import org.apache.zookeeper.ZooDefs;
 
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Server;
+import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
 
 public class Main {
@@ -52,13 +54,11 @@ public class Main {
     // One time usage static references
     static Cli execObj = null;
     static ZooKeeper zk = null;
-    static Semaphore mainThreadSem = null;
 
     // Static references that could change
     static Semaphore idlingSem = null;
     static HashMap<String, Integer> KVStore = new HashMap<>();
     static ArrayList<UpdateRequest> sentList = new ArrayList<UpdateRequest>();
-
     static int globalTxIDPending = 0;
     static int globalTxIDAcked = 0;
 
@@ -70,26 +70,28 @@ public class Main {
         @Parameters(index = "1", description = "control_path")
         String controlPath;
 
-        @Parameters(index = "2", description = "host_port")
-        String hostPort;
+        @Parameters(index = "2", description = "full address, ip:hostPort")
+        String address;
 
         @Override
         public Integer call() throws Exception {
 
             // Initial threadsafe setup
-            mainThreadSem = new Semaphore(0); // hold up main thread until exit is forced through zookeeper or GRPC call
             idlingSem = new Semaphore(1); // exactly one thread can run at once, all others have to wait
 
+            int hostPort = Integer.parseInt(address.split(":")[1]);
+            Server server = ServerBuilder.forPort(hostPort).addService(new Head()).addService(new Tail())
+                    .addService(new Debug())
+                    .addService(new Replica()).build();
+            server.start();
             startZookeeper();
-            mainThreadSem.acquire(); // main thread spinning
-
+            server.awaitTermination();
             return 0;
         }
     }
 
     public static void exit() {
         idlingSem.release();
-        mainThreadSem.release();
         System.exit(0);
     }
 
@@ -108,7 +110,7 @@ public class Main {
             while (actualPath == null) {
                 try {
                     actualPath = zk.create(execObj.controlPath + "/replica-",
-                            (execObj.hostPort + "\nujjwal").getBytes(),
+                            (execObj.address + "\nujjwal").getBytes(),
                             ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
                 } catch (KeeperException | InterruptedException e) {
                     System.out.println("\nCannot create my own node :(");
@@ -222,7 +224,7 @@ public class Main {
 
     }
 
-    private class Head extends HeadChainReplicaImplBase {
+    static class Head extends HeadChainReplicaImplBase {
         @Override
         public void increment(IncRequest request, StreamObserver<HeadResponse> responseObserver) {
             System.out.println("\nGot increment request");
@@ -269,7 +271,7 @@ public class Main {
         }
     }
 
-    private class Tail extends TailChainReplicaImplBase {
+    static class Tail extends TailChainReplicaImplBase {
         @Override
         public void get(GetRequest request, StreamObserver<GetResponse> responseObserver) {
             System.out.println("\nGot get request");
@@ -296,7 +298,7 @@ public class Main {
         }
     }
 
-    private class Debug extends ChainDebugImplBase {
+    static class Debug extends ChainDebugImplBase {
         @Override
         public void debug(ChainDebugRequest request, StreamObserver<ChainDebugResponse> responseObserver) {
             System.out.println("\nGot debug request");
@@ -312,17 +314,16 @@ public class Main {
 
         @Override
         public void exit(ExitRequest request, StreamObserver<ExitResponse> responseObserver) {
-            System.out.println("\nGot debug request");
+            System.out.println("\nGot exit request");
             responseObserver.onNext(ExitResponse.newBuilder().build());
             responseObserver.onCompleted();
 
             idlingSem.release();
-            mainThreadSem.release();
             System.exit(0);
         }
     }
 
-    private class Replica extends ReplicaImplBase {
+    static class Replica extends ReplicaImplBase {
         @Override
         public void update(UpdateRequest request, StreamObserver<UpdateResponse> responseObserver) {
 
