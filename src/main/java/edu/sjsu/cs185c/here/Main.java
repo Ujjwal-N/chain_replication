@@ -219,7 +219,7 @@ public class Main {
                 mySuccessorStub = newSuccessorStub;
             }
 
-        } catch (InterruptedException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         } finally {
             idlingSem.release();
@@ -282,7 +282,7 @@ public class Main {
                         }
                     }
                 }
-            } catch (InterruptedException e) {
+            } catch (Exception e) {
                 System.out.println("\n Error while processing an increment request");
                 e.printStackTrace();
             } finally {
@@ -310,7 +310,7 @@ public class Main {
                     responseObserver.onNext(actuallyTail);
                     responseObserver.onCompleted();
                 }
-            } catch (InterruptedException e) {
+            } catch (Exception e) {
                 System.out.println("\nError while processing a get request");
                 e.printStackTrace();
             } finally {
@@ -379,7 +379,7 @@ public class Main {
                 responseObserver.onNext(res);
                 responseObserver.onCompleted();
 
-            } catch (InterruptedException e) {
+            } catch (Exception e) {
                 System.out.println("\nError while processing an update request");
                 e.printStackTrace();
             } finally {
@@ -418,7 +418,7 @@ public class Main {
                 responseObserver.onNext(AckResponse.newBuilder().build());
                 responseObserver.onCompleted();
 
-            } catch (InterruptedException | NullPointerException e) {
+            } catch (Exception e) {
                 System.out.println("\nError while processing an ack request");
                 e.printStackTrace();
             } finally {
@@ -502,7 +502,7 @@ public class Main {
                     responseObserver.onCompleted();
                 }
 
-            } catch (InterruptedException | NullPointerException e) {
+            } catch (Exception e) {
                 System.out.println("\nError while processing a StateTransfer request");
                 e.printStackTrace();
             } finally {
