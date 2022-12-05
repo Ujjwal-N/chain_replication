@@ -353,6 +353,11 @@ public class Main {
                 idlingSem.acquire();
 
                 boolean needStateTransfer = KVStore.isEmpty();
+
+                UpdateResponse res = UpdateResponse.newBuilder().setRc(needStateTransfer ? 1 : 0).build();
+                responseObserver.onNext(res);
+                responseObserver.onCompleted();
+
                 KVStore.put(request.getKey(), request.getNewValue());
                 globalTxIDPending = request.getXid();
 
@@ -375,10 +380,6 @@ public class Main {
                     System.out.println("\nNeed a state transfer");
                 }
 
-                UpdateResponse res = UpdateResponse.newBuilder().setRc(needStateTransfer ? 1 : 0).build();
-                responseObserver.onNext(res);
-                responseObserver.onCompleted();
-
             } catch (Exception e) {
                 System.out.println("\nError while processing an update request");
                 e.printStackTrace();
@@ -393,6 +394,9 @@ public class Main {
             System.out.println("\nGot ack request");
             try {
                 idlingSem.acquire();
+
+                responseObserver.onNext(AckResponse.newBuilder().build());
+                responseObserver.onCompleted();
 
                 if (myPredecessorStub == null) {
                     System.out.println("\nI am the head");
@@ -414,9 +418,6 @@ public class Main {
                 if (reqToDelete != null) {
                     sentList.remove(reqToDelete);
                 }
-
-                responseObserver.onNext(AckResponse.newBuilder().build());
-                responseObserver.onCompleted();
 
             } catch (Exception e) {
                 System.out.println("\nError while processing an ack request");
@@ -440,6 +441,11 @@ public class Main {
                     responseObserver.onNext(noNeed);
                     responseObserver.onCompleted();
                 } else {
+                    awaitingStateTransfer = false;
+                    StateTransferResponse thanks = StateTransferResponse.newBuilder().setRc(0).build();
+                    responseObserver.onNext(thanks);
+                    responseObserver.onCompleted();
+
                     System.out.println("\nMerging state transfers with memory");
 
                     Map<String, Integer> recievedKVStore = request.getStateMap();
@@ -495,11 +501,6 @@ public class Main {
                     }
                     // ignoring the txID part of the update request, the above logic should handle
                     // that...
-
-                    awaitingStateTransfer = false;
-                    StateTransferResponse thanks = StateTransferResponse.newBuilder().setRc(0).build();
-                    responseObserver.onNext(thanks);
-                    responseObserver.onCompleted();
                 }
 
             } catch (Exception e) {
