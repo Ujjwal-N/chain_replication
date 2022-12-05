@@ -5,22 +5,35 @@ import picocli.CommandLine.Command;
 import picocli.CommandLine.Parameters;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Semaphore;
 
 import org.apache.zookeeper.ZooKeeper;
 
+import edu.sjsu.cs249.chain.AckRequest;
+import edu.sjsu.cs249.chain.AckResponse;
+import edu.sjsu.cs249.chain.ChainDebugRequest;
+import edu.sjsu.cs249.chain.ChainDebugResponse;
+import edu.sjsu.cs249.chain.ExitRequest;
+import edu.sjsu.cs249.chain.ExitResponse;
 import edu.sjsu.cs249.chain.GetRequest;
 import edu.sjsu.cs249.chain.GetResponse;
 import edu.sjsu.cs249.chain.HeadResponse;
 import edu.sjsu.cs249.chain.IncRequest;
 import edu.sjsu.cs249.chain.ReplicaGrpc;
+import edu.sjsu.cs249.chain.StateTransferRequest;
+import edu.sjsu.cs249.chain.StateTransferResponse;
 import edu.sjsu.cs249.chain.UpdateRequest;
+import edu.sjsu.cs249.chain.UpdateResponse;
+import edu.sjsu.cs249.chain.ChainDebugGrpc.ChainDebugImplBase;
 import edu.sjsu.cs249.chain.HeadChainReplicaGrpc.HeadChainReplicaImplBase;
 import edu.sjsu.cs249.chain.ReplicaGrpc.ReplicaBlockingStub;
+import edu.sjsu.cs249.chain.ReplicaGrpc.ReplicaImplBase;
 import edu.sjsu.cs249.chain.TailChainReplicaGrpc.TailChainReplicaImplBase;
 
 import org.apache.zookeeper.CreateMode;
@@ -37,13 +50,14 @@ public class Main {
     static final boolean debug = true;
 
     // One time usage static references
-    static Cli execObj;
-    static ZooKeeper zk;
-    static Semaphore mainThreadSem;
+    static Cli execObj = null;
+    static ZooKeeper zk = null;
+    static Semaphore mainThreadSem = null;
 
     // Static references that could change
-    static Semaphore idlingSem;
+    static Semaphore idlingSem = null;
     static HashMap<String, Integer> KVStore = new HashMap<>();
+    static ArrayList<UpdateRequest> sentList = new ArrayList<UpdateRequest>();
 
     static int globalTxIDPending = 0;
     static int globalTxIDAcked = 0;
@@ -63,11 +77,8 @@ public class Main {
         public Integer call() throws Exception {
 
             // Initial threadsafe setup
-            mainThreadSem = new Semaphore(1);
-            idlingSem = new Semaphore(1);
-
-            mainThreadSem.acquire();
-            idlingSem.acquire();
+            mainThreadSem = new Semaphore(0); // hold up main thread until exit is forced through zookeeper or GRPC call
+            idlingSem = new Semaphore(1); // exactly one thread can run at once, all others have to wait
 
             startZookeeper();
             mainThreadSem.acquire(); // main thread spinning
@@ -122,6 +133,8 @@ public class Main {
     static ReplicaBlockingStub myPredecessorStub = null;
     static ReplicaBlockingStub mySuccessorStub = null;
 
+    static boolean awaitingStateTransfer = false;
+
     public static void calculateNeighborsAndUpdateStubs(String myNodeName) {
 
         System.out.println("==========Fetching children==========");
@@ -139,8 +152,8 @@ public class Main {
             }
         }
 
-        System.out.println(currentChildren);
         Collections.sort(currentChildren);
+        System.out.println(currentChildren);
 
         int myIndex = currentChildren.indexOf(myNodeName);
         String myPredecessorName = (myIndex == 0) ? null : currentChildren.get(myIndex - 1);
@@ -150,13 +163,19 @@ public class Main {
             idlingSem.acquire();
             if (myPredecessorName == null) {
                 System.out.println("I am the head now!");
+                awaitingStateTransfer = false;
                 myPredecessorStub = null;
             } else {
                 if (!nameToStub.containsKey(myPredecessorName)) {
                     nameToStub.put(myPredecessorName, createStub(myPredecessorName));
                 }
                 System.out.println(myPredecessorName + " is my predecessor!");
-                myPredecessorStub = nameToStub.get(myPredecessorName);
+                ReplicaBlockingStub newPredecessorStub = nameToStub.get(myPredecessorName);
+                if (newPredecessorStub != myPredecessorStub) {
+                    awaitingStateTransfer = true;
+                    // i have a new predecessor and should have a state transfer
+                }
+                myPredecessorStub = newPredecessorStub;
             }
 
             if (mySuccessorName == null) {
@@ -167,7 +186,15 @@ public class Main {
                     nameToStub.put(mySuccessorName, createStub(mySuccessorName));
                 }
                 System.out.println(mySuccessorName + " is my successor!");
-                mySuccessorStub = nameToStub.get(mySuccessorName);
+                ReplicaBlockingStub newSuccessorStub = nameToStub.get(mySuccessorName);
+                if (mySuccessorStub != newSuccessorStub) {
+                    System.out.println("Sending state transfer...");
+                    StateTransferRequest req = StateTransferRequest.newBuilder().putAllState(KVStore)
+                            .setXid(globalTxIDAcked).addAllSent(sentList).build();
+                    mySuccessorStub.stateTransfer(req);
+                    // my new successor should get a state transfer...
+                }
+                mySuccessorStub = newSuccessorStub;
             }
 
         } catch (KeeperException | InterruptedException | NullPointerException e) {
@@ -198,15 +225,16 @@ public class Main {
     private class Head extends HeadChainReplicaImplBase {
         @Override
         public void increment(IncRequest request, StreamObserver<HeadResponse> responseObserver) {
+            System.out.println("\nGot increment request");
             try {
                 idlingSem.acquire();
 
                 if (myPredecessorStub != null) {
+                    System.out.println("\nNot the head");
                     HeadResponse notHead = HeadResponse.newBuilder().setRc(1).build();
                     responseObserver.onNext(notHead);
                     responseObserver.onCompleted();
                 } else {
-                    HeadResponse actuallyHead = HeadResponse.newBuilder().setRc(0).build();
 
                     if (!KVStore.containsKey(request.getKey())) {
                         KVStore.put(request.getKey(), 0);
@@ -218,8 +246,16 @@ public class Main {
                     if (mySuccessorStub != null) {
                         UpdateRequest req = UpdateRequest.newBuilder().setKey(request.getKey()).setNewValue(newValue)
                                 .setXid(globalTxIDPending).build();
-                        mySuccessorStub.update(req);
+                        if (mySuccessorStub != null) {
+                            System.out.println("\nForwarded update");
+                            mySuccessorStub.update(req);
+                            sentList.add(req);
+                        } else {
+                            System.out.println("\nno successor :(");
+                        }
                     }
+
+                    HeadResponse actuallyHead = HeadResponse.newBuilder().setRc(0).build();
                     responseObserver.onNext(actuallyHead);
                     responseObserver.onCompleted();
                 }
@@ -236,20 +272,221 @@ public class Main {
     private class Tail extends TailChainReplicaImplBase {
         @Override
         public void get(GetRequest request, StreamObserver<GetResponse> responseObserver) {
+            System.out.println("\nGot get request");
             try {
                 idlingSem.acquire();
                 if (mySuccessorStub != null) {
+                    System.out.println("\nNot the tail");
                     GetResponse notTail = GetResponse.newBuilder().setRc(1).build();
                     responseObserver.onNext(notTail);
                     responseObserver.onCompleted();
                 } else {
+                    System.out.println("\nResponding back");
                     int val = KVStore.containsKey(request.getKey()) ? KVStore.get(request.getKey()) : 0;
                     GetResponse actuallyTail = GetResponse.newBuilder().setRc(0).setValue(val).build();
                     responseObserver.onNext(actuallyTail);
                     responseObserver.onCompleted();
                 }
             } catch (InterruptedException e) {
-                System.out.println("\n Error while processing a get request");
+                System.out.println("\nError while processing a get request");
+                e.printStackTrace();
+            } finally {
+                idlingSem.release();
+            }
+        }
+    }
+
+    private class Debug extends ChainDebugImplBase {
+        @Override
+        public void debug(ChainDebugRequest request, StreamObserver<ChainDebugResponse> responseObserver) {
+            System.out.println("\nGot debug request");
+            ChainDebugResponse.Builder builder = ChainDebugResponse.newBuilder();
+
+            builder.addAllSent(sentList);
+            builder.putAllState(KVStore);
+            builder.setXid(globalTxIDAcked);
+
+            responseObserver.onNext(builder.build());
+            responseObserver.onCompleted();
+        }
+
+        @Override
+        public void exit(ExitRequest request, StreamObserver<ExitResponse> responseObserver) {
+            System.out.println("\nGot debug request");
+            responseObserver.onNext(ExitResponse.newBuilder().build());
+            responseObserver.onCompleted();
+
+            idlingSem.release();
+            mainThreadSem.release();
+            System.exit(0);
+        }
+    }
+
+    private class Replica extends ReplicaImplBase {
+        @Override
+        public void update(UpdateRequest request, StreamObserver<UpdateResponse> responseObserver) {
+
+            System.out.println("\nGot update request");
+            try {
+                idlingSem.acquire();
+
+                boolean needStateTransfer = KVStore.isEmpty();
+                KVStore.put(request.getKey(), request.getNewValue());
+                globalTxIDPending = request.getXid();
+
+                if (mySuccessorStub == null) {
+                    System.out.println("\nI am the tail");
+                    if (myPredecessorStub != null) {
+                        System.out.println("\nSending the ack back");
+                        AckRequest req = AckRequest.newBuilder().setXid(request.getXid()).build();
+                        myPredecessorStub.ack(req);
+                        globalTxIDAcked = request.getXid();
+                    }
+                } else {
+                    System.out.println("\nForwarding to successor");
+                    mySuccessorStub.update(request);
+                    sentList.add(request);
+
+                }
+
+                if (needStateTransfer) {
+                    System.out.println("\nNeed a state transfer");
+                }
+
+                UpdateResponse res = UpdateResponse.newBuilder().setRc(needStateTransfer ? 1 : 0).build();
+                responseObserver.onNext(res);
+                responseObserver.onCompleted();
+
+            } catch (InterruptedException e) {
+                System.out.println("\nError while processing an update request");
+                e.printStackTrace();
+            } finally {
+                idlingSem.release();
+            }
+
+        }
+
+        @Override
+        public void ack(AckRequest request, StreamObserver<AckResponse> responseObserver) {
+            System.out.println("\nGot ack request");
+            try {
+                idlingSem.acquire();
+
+                if (myPredecessorStub == null) {
+                    System.out.println("\nI am the head");
+                } else {
+                    System.out.println("\nForwarding ack to predecessor");
+                    myPredecessorStub.ack(request);
+                }
+
+                globalTxIDAcked = request.getXid();
+
+                UpdateRequest reqToDelete = null;
+                for (UpdateRequest r : sentList) {
+                    if (r.getXid() == request.getXid()) {
+                        reqToDelete = r;
+                        break;
+                    }
+                }
+                if (reqToDelete != null) {
+                    sentList.remove(reqToDelete);
+                }
+
+                responseObserver.onNext(AckResponse.newBuilder().build());
+                responseObserver.onCompleted();
+
+            } catch (InterruptedException | NullPointerException e) {
+                System.out.println("\nError while processing an ack request");
+                e.printStackTrace();
+            } finally {
+                idlingSem.release();
+            }
+        }
+
+        @Override
+        public void stateTransfer(StateTransferRequest request,
+                StreamObserver<StateTransferResponse> responseObserver) {
+
+            System.out.println("\nGot StateTransfer request");
+            try {
+                idlingSem.acquire();
+                if (!awaitingStateTransfer) {
+                    System.out.println("\nNo need for a state transfer");
+                    StateTransferResponse noNeed = StateTransferResponse.newBuilder().setRc(1).build();
+
+                    responseObserver.onNext(noNeed);
+                    responseObserver.onCompleted();
+                } else {
+                    System.out.println("\nMerging state transfers with memory");
+
+                    Map<String, Integer> recievedKVStore = request.getStateMap();
+                    for (String key : recievedKVStore.keySet()) {
+                        System.out.println("For " + key + ", merging KVStore");
+                        if (KVStore.containsKey(key)) {
+                            // prioritizing larger value
+                            KVStore.put(key, KVStore.get(key) >= recievedKVStore.get(key) ? KVStore.get(key)
+                                    : recievedKVStore.get(key));
+                        } else {
+                            KVStore.put(key, recievedKVStore.get(key));
+                        }
+                    }
+
+                    List<UpdateRequest> recievedSentList = request.getSentList();
+                    for (UpdateRequest newUReq : recievedSentList) {
+                        if (newUReq.getXid() < globalTxIDAcked) {
+                            // request has already been processed, just resend ack
+                            AckRequest resendingOld = AckRequest.newBuilder().setXid(newUReq.getXid()).build();
+                            if (myPredecessorStub != null) {
+                                System.out.println("\nResending ack for tx id: " + newUReq.getXid());
+                                myPredecessorStub.ack(resendingOld);
+                            } else {
+                                System.out.println("\nOops I have no predecessor?!");
+                            }
+                            continue;
+                        }
+
+                        // potentially a new request
+                        boolean isNewReq = true;
+                        for (UpdateRequest sReq : sentList) {
+                            if (sReq.getXid() == newUReq.getXid()) {
+                                isNewReq = false;
+                                break;
+                            }
+                        }
+
+                        if (isNewReq) {
+                            // not adding to KVStore, assuming thats already up to date
+                            if (mySuccessorStub != null) {
+                                System.out.println("\nForwarding request with tx id:" + newUReq.getXid());
+                                mySuccessorStub.update(newUReq);
+                                sentList.add(newUReq);
+                                globalTxIDPending = Integer.max(globalTxIDPending, newUReq.getXid());
+                            } else {
+                                // assuming im the tail now, no point adding to sentList
+                                System.out.println(
+                                        "\nNo successor to forward request to, assuming I am tail and sending ack back instead");
+                                AckRequest newAck = AckRequest.newBuilder().setXid(newUReq.getXid()).build();
+                                if (myPredecessorStub != null) {
+                                    myPredecessorStub.ack(newAck);
+                                    globalTxIDAcked = Integer.max(globalTxIDAcked, newUReq.getXid());
+                                } else {
+                                    System.out.println("\nOops I have no predecessor?!");
+                                }
+
+                            }
+                        }
+                    }
+                    // ignoring the txID part of the update request, the above logic should handle
+                    // that...
+
+                    awaitingStateTransfer = false;
+                    StateTransferResponse thanks = StateTransferResponse.newBuilder().setRc(0).build();
+                    responseObserver.onNext(thanks);
+                    responseObserver.onCompleted();
+                }
+
+            } catch (InterruptedException | NullPointerException e) {
+                System.out.println("\nError while processing a StateTransfer request");
                 e.printStackTrace();
             } finally {
                 idlingSem.release();
