@@ -131,7 +131,7 @@ public class Main {
 
     }
 
-    static HashMap<String, ReplicaBlockingStub> nameToStub = new HashMap<>();
+    static volatile HashMap<String, ReplicaBlockingStub> nameToStub = new HashMap<>();
     static ReplicaBlockingStub myPredecessorStub = null;
     static ReplicaBlockingStub mySuccessorStub = null;
 
@@ -169,7 +169,17 @@ public class Main {
                 myPredecessorStub = null;
             } else {
                 if (!nameToStub.containsKey(myPredecessorName)) {
-                    nameToStub.put(myPredecessorName, createStub(myPredecessorName));
+                    try {
+                        ReplicaBlockingStub newPredStub = null;
+                        while (newPredStub == null) {
+                            newPredStub = createStub(myPredecessorName);
+                            System.out.println("trying to create predecessor stub");
+                        }
+                        nameToStub.put(myPredecessorName, newPredStub);
+                    } catch (NullPointerException | KeeperException e) {
+                        System.out.println("Error while creating predecessor stub");
+                        e.printStackTrace();
+                    }
                 }
                 System.out.println(myPredecessorName + " is my predecessor!");
                 ReplicaBlockingStub newPredecessorStub = nameToStub.get(myPredecessorName);
@@ -185,22 +195,31 @@ public class Main {
                 mySuccessorStub = null;
             } else {
                 if (!nameToStub.containsKey(mySuccessorName)) {
-                    nameToStub.put(mySuccessorName, createStub(mySuccessorName));
+                    try {
+                        ReplicaBlockingStub newSuccStub = null;
+                        while (newSuccStub == null) {
+                            newSuccStub = createStub(mySuccessorName);
+                            System.out.println("trying to create successor stub");
+                        }
+                        nameToStub.put(mySuccessorName, newSuccStub);
+                    } catch (NullPointerException | KeeperException e) {
+                        System.out.println("Error while creating successor stub");
+                        e.printStackTrace();
+                    }
                 }
                 System.out.println(mySuccessorName + " is my successor!");
                 ReplicaBlockingStub newSuccessorStub = nameToStub.get(mySuccessorName);
                 if (mySuccessorStub != newSuccessorStub) {
+                    // sending state transfer
                     System.out.println("Sending state transfer...");
                     StateTransferRequest req = StateTransferRequest.newBuilder().putAllState(KVStore)
                             .setXid(globalTxIDAcked).addAllSent(sentList).build();
-                    mySuccessorStub.stateTransfer(req);
-                    // my new successor should get a state transfer...
+                    newSuccessorStub.stateTransfer(req);
                 }
                 mySuccessorStub = newSuccessorStub;
             }
 
-        } catch (KeeperException | InterruptedException | NullPointerException e) {
-            System.out.println("\nError while changing successor and/or predecessor stubs :(");
+        } catch (InterruptedException e) {
             e.printStackTrace();
         } finally {
             idlingSem.release();
@@ -237,12 +256,18 @@ public class Main {
                     responseObserver.onNext(notHead);
                     responseObserver.onCompleted();
                 } else {
+                    HeadResponse actuallyHead = HeadResponse.newBuilder().setRc(0).build();
+                    responseObserver.onNext(actuallyHead);
+                    responseObserver.onCompleted();
+
+                    System.out.println("\nSent back head response");
 
                     if (!KVStore.containsKey(request.getKey())) {
                         KVStore.put(request.getKey(), 0);
                     }
-                    int newValue = KVStore.get(request.getKey()) + 1;
+                    int newValue = KVStore.get(request.getKey()) + request.getIncValue();
                     KVStore.put(request.getKey(), newValue);
+                    System.out.println("Put value " + newValue + " for key: " + request.getKey());
                     globalTxIDPending++;
 
                     if (mySuccessorStub != null) {
@@ -256,10 +281,6 @@ public class Main {
                             System.out.println("\nno successor :(");
                         }
                     }
-
-                    HeadResponse actuallyHead = HeadResponse.newBuilder().setRc(0).build();
-                    responseObserver.onNext(actuallyHead);
-                    responseObserver.onCompleted();
                 }
             } catch (InterruptedException e) {
                 System.out.println("\n Error while processing an increment request");
@@ -375,6 +396,7 @@ public class Main {
 
                 if (myPredecessorStub == null) {
                     System.out.println("\nI am the head");
+
                 } else {
                     System.out.println("\nForwarding ack to predecessor");
                     myPredecessorStub.ack(request);
@@ -423,13 +445,7 @@ public class Main {
                     Map<String, Integer> recievedKVStore = request.getStateMap();
                     for (String key : recievedKVStore.keySet()) {
                         System.out.println("For " + key + ", merging KVStore");
-                        if (KVStore.containsKey(key)) {
-                            // prioritizing larger value
-                            KVStore.put(key, KVStore.get(key) >= recievedKVStore.get(key) ? KVStore.get(key)
-                                    : recievedKVStore.get(key));
-                        } else {
-                            KVStore.put(key, recievedKVStore.get(key));
-                        }
+                        KVStore.put(key, recievedKVStore.get(key));
                     }
 
                     List<UpdateRequest> recievedSentList = request.getSentList();
@@ -490,6 +506,7 @@ public class Main {
                 System.out.println("\nError while processing a StateTransfer request");
                 e.printStackTrace();
             } finally {
+                System.out.println("sem released");
                 idlingSem.release();
             }
         }
@@ -500,3 +517,7 @@ public class Main {
         System.exit(new CommandLine(execObj).execute(args));
     }
 }
+
+// 172.27.17.13
+// java -jar target/chain_replication-1.48.1-spring-boot.jar
+// zookeeper.class.homeofcode.com /newtry 172.27.17.13:2000
