@@ -112,7 +112,7 @@ public class Main {
                     actualPath = zk.create(execObj.controlPath + "/replica-",
                             (execObj.address + "\nujjwal").getBytes(),
                             ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
-                } catch (KeeperException | InterruptedException e) {
+                } catch (Exception e) {
                     System.out.println("\nCannot create my own node :(");
                     e.printStackTrace();
                 }
@@ -124,7 +124,7 @@ public class Main {
             System.out.println("My name is " + myNodeName);
             calculateNeighborsAndUpdateStubs(myNodeName);
 
-        } catch (IOException e) {
+        } catch (Exception e) {
             System.out.println("\nZookeeper Not Found :(");
             e.getStackTrace();
         }
@@ -148,7 +148,7 @@ public class Main {
                 currentChildren = zk.getChildren(execObj.controlPath, (e) -> {
                     calculateNeighborsAndUpdateStubs(myNodeName);
                 });
-            } catch (KeeperException | InterruptedException e) {
+            } catch (Exception e) {
                 System.out.println("\nCannot fetch children :(");
                 e.printStackTrace();
             }
@@ -176,7 +176,7 @@ public class Main {
                             System.out.println("trying to create predecessor stub");
                         }
                         nameToStub.put(myPredecessorName, newPredStub);
-                    } catch (NullPointerException | KeeperException e) {
+                    } catch (Exception e) {
                         System.out.println("Error while creating predecessor stub");
                         e.printStackTrace();
                     }
@@ -202,7 +202,7 @@ public class Main {
                             System.out.println("trying to create successor stub");
                         }
                         nameToStub.put(mySuccessorName, newSuccStub);
-                    } catch (NullPointerException | KeeperException e) {
+                    } catch (Exception e) {
                         System.out.println("Error while creating successor stub");
                         e.printStackTrace();
                     }
@@ -229,7 +229,7 @@ public class Main {
     }
 
     public static ReplicaBlockingStub createStub(String nodeName)
-            throws KeeperException, InterruptedException, NullPointerException {
+            throws Exception {
 
         byte[] dataBytes = zk.getData(execObj.controlPath + "/" + nodeName, null, null);
         String data = new String(dataBytes);
