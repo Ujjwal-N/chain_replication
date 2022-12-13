@@ -14,6 +14,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Semaphore;
 
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.Stat;
 
 import edu.sjsu.cs249.chain.AckRequest;
 import edu.sjsu.cs249.chain.AckResponse;
@@ -37,7 +38,6 @@ import edu.sjsu.cs249.chain.ReplicaGrpc.ReplicaImplBase;
 import edu.sjsu.cs249.chain.TailChainReplicaGrpc.TailChainReplicaImplBase;
 
 import org.apache.zookeeper.CreateMode;
-import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
 
@@ -98,6 +98,7 @@ public class Main {
     public static void startZookeeper() { // starting point of program
 
         try {
+            
             zk = new ZooKeeper(execObj.serverList, 10000, (e) -> {
                 if (e.getState() == Watcher.Event.KeeperState.Expired) {
                     exit();
@@ -109,20 +110,36 @@ public class Main {
             String actualPath = null;
             while (actualPath == null) {
                 try {
-                    actualPath = zk.create(execObj.controlPath + "/replica-",
-                            (execObj.address + "\nujjwal").getBytes(),
-                            ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
+                    List<String> currentChildren = zk.getChildren(execObj.controlPath, null);
+                    boolean imHere = false;
+                    for(String child : currentChildren){
+                        Stat s = new Stat();
+                        zk.getData(execObj.controlPath + "/" + child, null, s);
+                        if(s.getEphemeralOwner() == zk.getSessionId()){
+                            imHere = true;
+                        }
+                    }
+                    if(!imHere){
+                        
+                        actualPath = zk.create(execObj.controlPath + "/replica-",
+                        (execObj.address + "\nujjwal").getBytes(),
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL_SEQUENTIAL);
+
+                        String[] splittedPath = actualPath.split("\\/");
+
+                        String myNodeName = splittedPath[splittedPath.length - 1];
+                        System.out.println("My name is " + myNodeName);
+                        calculateNeighborsAndUpdateStubs(myNodeName);
+                        
+                    }
+                    
                 } catch (Exception e) {
                     System.out.println("\nCannot create my own node :(");
                     e.printStackTrace();
+                }finally{
+                    idlingSem.release();
                 }
             }
-
-            String[] splittedPath = actualPath.split("\\/");
-
-            String myNodeName = splittedPath[splittedPath.length - 1];
-            System.out.println("My name is " + myNodeName);
-            calculateNeighborsAndUpdateStubs(myNodeName);
 
         } catch (Exception e) {
             System.out.println("\nZookeeper Not Found :(");
@@ -135,7 +152,7 @@ public class Main {
     static ReplicaBlockingStub myPredecessorStub = null;
     static ReplicaBlockingStub mySuccessorStub = null;
 
-    static boolean awaitingStateTransfer = false;
+    static boolean awaitingStateTransfer = true;
 
     public static void calculateNeighborsAndUpdateStubs(String myNodeName) {
 
@@ -212,9 +229,18 @@ public class Main {
                 if (mySuccessorStub != newSuccessorStub) {
                     // sending state transfer
                     System.out.println("Sending state transfer...");
+
                     StateTransferRequest req = StateTransferRequest.newBuilder().putAllState(KVStore)
-                            .setXid(globalTxIDAcked).addAllSent(sentList).build();
-                    newSuccessorStub.stateTransfer(req);
+                    .setXid(globalTxIDAcked).addAllSent(sentList).build();
+                    StateTransferResponse res = null;
+                    while(res == null){
+                        try{
+                            res = newSuccessorStub.stateTransfer(req);
+                        }catch(Exception e){
+                            e.printStackTrace();
+                        }
+                    }
+
                 }
                 mySuccessorStub = newSuccessorStub;
             }
@@ -256,9 +282,7 @@ public class Main {
                     responseObserver.onNext(notHead);
                     responseObserver.onCompleted();
                 } else {
-                    HeadResponse actuallyHead = HeadResponse.newBuilder().setRc(0).build();
-                    responseObserver.onNext(actuallyHead);
-                    responseObserver.onCompleted();
+                    awaitingStateTransfer = false;
 
                     System.out.println("\nSent back head response");
 
@@ -281,6 +305,10 @@ public class Main {
                             System.out.println("\nno successor :(");
                         }
                     }
+
+                    HeadResponse actuallyHead = HeadResponse.newBuilder().setRc(0).build();
+                    responseObserver.onNext(actuallyHead);
+                    responseObserver.onCompleted();
                 }
             } catch (Exception e) {
                 System.out.println("\n Error while processing an increment request");
@@ -298,18 +326,13 @@ public class Main {
             System.out.println("\nGot get request");
             try {
                 idlingSem.acquire();
-                if (mySuccessorStub != null) {
-                    System.out.println("\nNot the tail");
-                    GetResponse notTail = GetResponse.newBuilder().setRc(1).build();
-                    responseObserver.onNext(notTail);
-                    responseObserver.onCompleted();
-                } else {
-                    System.out.println("\nResponding back");
-                    int val = KVStore.containsKey(request.getKey()) ? KVStore.get(request.getKey()) : 0;
-                    GetResponse actuallyTail = GetResponse.newBuilder().setRc(0).setValue(val).build();
-                    responseObserver.onNext(actuallyTail);
-                    responseObserver.onCompleted();
-                }
+
+                System.out.println("\nResponding back");
+                int val = KVStore.containsKey(request.getKey()) ? KVStore.get(request.getKey()) : 0;
+                GetResponse actuallyTail = GetResponse.newBuilder().setRc(0).setValue(val).build();
+                responseObserver.onNext(actuallyTail);
+                responseObserver.onCompleted();
+
             } catch (Exception e) {
                 System.out.println("\nError while processing a get request");
                 e.printStackTrace();
@@ -351,7 +374,7 @@ public class Main {
             System.out.println("\nGot update request");
             try {
                 idlingSem.acquire();
-
+                System.out.println("\nthe id is: " + request.getXid());
                 boolean needStateTransfer = KVStore.isEmpty();
 
                 UpdateResponse res = UpdateResponse.newBuilder().setRc(needStateTransfer ? 1 : 0).build();
@@ -364,7 +387,7 @@ public class Main {
                 if (mySuccessorStub == null) {
                     System.out.println("\nI am the tail");
                     if (myPredecessorStub != null) {
-                        System.out.println("\nSending the ack back");
+                        System.out.println("\nSending the ack back: " + request.getXid());
                         AckRequest req = AckRequest.newBuilder().setXid(request.getXid()).build();
                         myPredecessorStub.ack(req);
                         globalTxIDAcked = request.getXid();
@@ -446,6 +469,23 @@ public class Main {
                     responseObserver.onNext(thanks);
                     responseObserver.onCompleted();
 
+                    if(myPredecessorStub == null){
+                        List<String> currentChildren = zk.getChildren(execObj.controlPath, null);
+                        String myName = null;
+                        for(String child : currentChildren){
+                            Stat s = new Stat();
+                            zk.getData(execObj.controlPath + "/" + child, null, s);
+                            if(s.getEphemeralOwner() == zk.getSessionId()){
+                                myName = child;
+                            }
+                        }
+    
+                        idlingSem.release();
+                        calculateNeighborsAndUpdateStubs(myName);
+                        idlingSem.acquire();
+                    }
+
+
                     System.out.println("\nMerging state transfers with memory");
 
                     Map<String, Integer> recievedKVStore = request.getStateMap();
@@ -501,6 +541,7 @@ public class Main {
                     }
                     // ignoring the txID part of the update request, the above logic should handle
                     // that...
+                    globalTxIDAcked = Integer.max(globalTxIDAcked, request.getXid());
                 }
 
             } catch (Exception e) {
