@@ -54,17 +54,19 @@ public class UpdateRequestManager {
     }
 
     public synchronized UpdateRequest peekPendingUpdate() {
-        if (pendingList.peek() == null) {
+        ComparableRequest retVal = pendingList.peek();
+        if (retVal == null) {
             return null;
         }
-        return pendingList.peek().req;
+        return retVal.req;
     }
 
     public synchronized UpdateRequest popPendingUpdate() {
-        if (pendingList.poll() == null) {
+        ComparableRequest retVal = pendingList.poll();
+        if (retVal == null) {
             return null;
         }
-        return pendingList.poll().req;
+        return retVal.req;
     }
 
     // -1: no response

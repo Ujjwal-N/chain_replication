@@ -372,6 +372,7 @@ public class Main {
             System.out.println("\nGot increment request");
             try {
                 stubSem.acquire(); // check if i'm actually the head
+
                 headResponseObserver = responseObserver; // used to send incresponse back when ack is returned
 
                 if (ackManager.predecessorStub != null) {
@@ -380,6 +381,9 @@ public class Main {
                     responseObserver.onNext(notHead);
                     responseObserver.onCompleted();
                 } else {
+                    if (KVStore.get(request.getKey()) == null) {
+                        KVStore.put(request.getKey(), 0);
+                    }
                     int newValue = KVStore.get(request.getKey()) + request.getIncValue();
                     KVStore.put(request.getKey(), newValue);
                     updateManager.incrementTxId();

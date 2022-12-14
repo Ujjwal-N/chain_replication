@@ -35,17 +35,19 @@ public class AckRequestManager {
     }
 
     public AckRequest peekPendingAck() {
-        if (buffer.peek() == null) {
+        ComparableRequest retVal = buffer.peek();
+        if (retVal == null) {
             return null;
         }
-        return buffer.peek().req;
+        return retVal.req;
     }
 
     public AckRequest popPendingAck() {
-        if (buffer.poll() == null) {
+        ComparableRequest retVal = buffer.poll();
+        if (retVal == null) {
             return null;
         }
-        return buffer.poll().req;
+        return retVal.req;
     }
 
     // -1: no response
