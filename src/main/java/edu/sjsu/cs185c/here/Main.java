@@ -47,6 +47,7 @@ import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
 
 public class Main {
+    static final HeadResponse actuallyHead = HeadResponse.newBuilder().setRc(0).build();
 
     // Thread-safe managers
     static final UpdateRequestManager updateManager = new UpdateRequestManager();
@@ -343,8 +344,7 @@ public class Main {
                             System.out.println(
                                     "Assuming I am the head now, sending head response for txId and removing it from sentList: "
                                             + txId);
-                            HeadResponse res = HeadResponse.newBuilder().setRc(0).build();
-                            headResponseObserver.onNext(res);
+                            headResponseObserver.onNext(actuallyHead);
                             headResponseObserver.onCompleted();
                         }
                         if (rc == 1) {
