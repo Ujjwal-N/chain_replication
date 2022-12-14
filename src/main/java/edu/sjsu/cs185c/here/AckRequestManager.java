@@ -22,6 +22,7 @@ public class AckRequestManager {
 
     public ReplicaBlockingStub predecessorStub;
     private int currentTxId;
+    private int lastDeliveredTxId;
     private PriorityBlockingQueue<ComparableRequest> buffer = new PriorityBlockingQueue<>();
 
     public synchronized void addAckRequest(AckRequest req) {
@@ -51,8 +52,8 @@ public class AckRequestManager {
     // 0: can't send yet
     // 1: success
     public synchronized int executeRPC(AckRequest req) throws Exception {
-        if ((getTxId() + 1) != req.getXid()) {
-            System.out.println("Cannot send ack request because current xid is " + currentTxId
+        if ((lastDeliveredTxId + 1) != req.getXid()) {
+            System.out.println("Cannot send ack request because last delivered xid is " + lastDeliveredTxId
                     + ", but request's xid is " + req.getXid());
             return 0;
         }
@@ -60,6 +61,9 @@ public class AckRequestManager {
             return -1;
         }
         AckResponse res = predecessorStub.ack(req);
+        if (res != null) {
+            lastDeliveredTxId = req.getXid();
+        }
         return res == null ? -1 : 1;
     }
 }

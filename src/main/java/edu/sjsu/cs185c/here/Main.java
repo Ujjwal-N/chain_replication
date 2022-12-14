@@ -79,7 +79,11 @@ public class Main {
                     .addService(new Debug())
                     .addService(new Replica()).build();
             server.start();
+            Thread updatesThread = new Thread(new ProcessUpdates(), "Process Updates");
+            Thread acksThread = new Thread(new ProcessAcks(), "Process Acks");
             startZookeeper();
+            updatesThread.start();
+            acksThread.start();
             server.awaitTermination();
             return 0;
         }
@@ -91,7 +95,6 @@ public class Main {
     }
 
     public synchronized static void startZookeeper() { // starting point of program
-
         try {
 
             zk = new ZooKeeper(execObj.serverList, 10000, (e) -> {
@@ -256,10 +259,11 @@ public class Main {
 
     }
 
-    public class ProcessUpdates implements Runnable { // make thread and start it, also add prints
+    static public class ProcessUpdates implements Runnable { // make thread and start it, also add prints
 
         @Override
         public void run() {
+            System.out.println("Started processing updates...");
             while (true) {
                 UpdateRequest currUpdateReq = updateManager.peekPendingUpdate();
                 boolean done = false;
@@ -306,9 +310,10 @@ public class Main {
         }
     }
 
-    public class ProcessAcks implements Runnable {
+    static public class ProcessAcks implements Runnable {
         @Override
         public void run() {
+            System.out.println("Started processing acks...");
             while (true) {
                 AckRequest currAckRequest = ackManager.peekPendingAck();
                 boolean done = false;

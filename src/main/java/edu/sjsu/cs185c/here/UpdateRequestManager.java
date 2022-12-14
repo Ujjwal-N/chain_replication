@@ -23,6 +23,7 @@ public class UpdateRequestManager {
 
     public ReplicaBlockingStub successorStub;
     private int currentTxId;
+    private int lastDeliveredTxId;
     private final PriorityBlockingQueue<ComparableRequest> pendingList = new PriorityBlockingQueue<>();
     private final ArrayList<UpdateRequest> sentList = new ArrayList<UpdateRequest>();
 
@@ -70,8 +71,8 @@ public class UpdateRequestManager {
     // 0: can't send yet
     // 1: success
     public synchronized int executeRPC(UpdateRequest req) throws Exception {
-        if ((getTxId() + 1) != req.getXid()) {
-            System.out.println("Cannot forward request because current xid is " + currentTxId
+        if ((lastDeliveredTxId + 1) != req.getXid()) {
+            System.out.println("Cannot forward request because last delivered xid is " + lastDeliveredTxId
                     + ", but request's xid is " + req.getXid());
             return 0;
         }
@@ -80,6 +81,7 @@ public class UpdateRequestManager {
         }
         UpdateResponse res = successorStub.update(req);
         if (res != null) {
+            lastDeliveredTxId = req.getXid();
             sentList.add(req);
         }
         return res == null ? -1 : 1;
