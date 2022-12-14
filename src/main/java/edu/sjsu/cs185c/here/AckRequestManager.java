@@ -68,4 +68,8 @@ public class AckRequestManager {
         }
         return res == null ? -1 : 1;
     }
+
+    public synchronized void updateLastDelivered(int txId) {
+        lastDeliveredTxId = txId;
+    }
 }

@@ -89,6 +89,10 @@ public class UpdateRequestManager {
         return res == null ? -1 : 1;
     }
 
+    public synchronized void updateLastDelivered(int txId) {
+        lastDeliveredTxId = txId;
+    }
+
     public synchronized void removeFromSentList(int txId) {
         UpdateRequest itemToRemove = null;
         for (UpdateRequest item : sentList) {

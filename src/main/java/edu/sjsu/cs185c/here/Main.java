@@ -285,6 +285,7 @@ public class Main {
                         }
                         if (updateManager.successorStub == null) {
                             int txId = updateManager.popPendingUpdate().getXid();
+                            updateManager.updateLastDelivered(txId);
                             System.out.println("Assuming I am the tail now, adding ack to buffer for txId: " + txId);
                             AckRequest ack = AckRequest.newBuilder().setXid(txId).build();
                             ackManager.addAckRequest(ack);
@@ -336,6 +337,7 @@ public class Main {
                         }
                         if (ackManager.predecessorStub == null) {
                             int txId = ackManager.popPendingAck().getXid();
+                            ackManager.updateLastDelivered(txId);
                             updateManager.removeFromSentList(txId);
 
                             System.out.println(
